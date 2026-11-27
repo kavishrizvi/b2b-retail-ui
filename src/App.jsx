@@ -1,126 +1,87 @@
 import { useCallback, useEffect, useState } from "react";
-import { createOrder, getOrder, extractId } from "./api.js";
+import { getCustomer, listProducts } from "./api.js";
+import { num } from "./shared.jsx";
+import OrderDesk from "./OrderDesk.jsx";
+import Products from "./Products.jsx";
+import Admin from "./Admin.jsx";
 
-const KEY = "oms-ui-history";
-const loadHistory = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch { return []; } };
-const when = (iso) => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-const show = (v) => (v !== null && typeof v === "object" ? JSON.stringify(v) : String(v));
-
-function Result({ data }) {
-  if (data === null || data === undefined) return null;
-  if (typeof data !== "object") return <pre className="raw">{String(data)}</pre>;
-  return (
-    <table className="kv"><tbody>
-      {Object.entries(data).map(([k, v]) => (
-        <tr key={k}><th>{k}</th><td>{k.toLowerCase().includes("status") ? <span className="badge">{show(v)}</span> : show(v)}</td></tr>
-      ))}
-    </tbody></table>
-  );
-}
+const CUSTOMER_KEY = "oms-ui-customer";
+const TABS = [["order", "Order desk"], ["products", "Products"], ["admin", "Admin"]];
+const savedCustomer = () => { try { return localStorage.getItem(CUSTOMER_KEY) || ""; } catch { return ""; } };
 
 export default function App() {
-  const [form, setForm] = useState({ productId: "P1", quantity: 2, amount: 499 });
-  const [placing, setPlacing] = useState(false);
-  const [placeError, setPlaceError] = useState("");
-  const [placed, setPlaced] = useState(null);
+  const [tab, setTab] = useState("order");
 
-  const [history, setHistory] = useState(loadHistory);
-  const [lookupId, setLookupId] = useState("");
-  const [order, setOrder] = useState(null);
-  const [looking, setLooking] = useState(false);
-  const [lookupError, setLookupError] = useState("");
-  const [auto, setAuto] = useState(false);
+  const [customerId, setCustomerId] = useState(savedCustomer);
+  const [draft, setDraft] = useState(savedCustomer);
+  const [customer, setCustomer] = useState(null);
+  const [customerError, setCustomerError] = useState("");
 
-  const remember = (entry) => {
-    const next = [entry, ...history.filter((h) => h.id !== entry.id)].slice(0, 25);
-    setHistory(next);
-    try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { /* storage unavailable */ }
-  };
+  const [products, setProducts] = useState([]);
+  const [productsError, setProductsError] = useState("");
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [pick, setPick] = useState(null);
 
-  const lookup = useCallback(async (id, quiet = false) => {
-    if (!id) return;
-    if (!quiet) setLooking(true);
-    setLookupError("");
-    try { setOrder(await getOrder(id.trim())); }
-    catch (e) { setOrder(null); setLookupError(e.message); }
-    setLooking(false);
+  const refreshCustomer = useCallback(async () => {
+    if (!customerId) { setCustomer(null); setCustomerError(""); return; }
+    try { setCustomer(await getCustomer(customerId)); setCustomerError(""); }
+    catch (e) { setCustomer(null); setCustomerError(e.message); }
+  }, [customerId]);
+
+  const refreshProducts = useCallback(async () => {
+    setLoadingProducts(true); setProductsError("");
+    try { setProducts(await listProducts()); }
+    catch (e) { setProductsError(e.message); }
+    setLoadingProducts(false);
   }, []);
 
-  useEffect(() => {
-    if (!auto || !lookupId) return;
-    const t = setInterval(() => lookup(lookupId, true), 3000);
-    return () => clearInterval(t);
-  }, [auto, lookupId, lookup]);
+  useEffect(() => { refreshCustomer(); }, [refreshCustomer]);
+  useEffect(() => { refreshProducts(); }, [refreshProducts]);
 
-  async function submit(e) {
+  // An order reached a final state: points and stock may have changed.
+  const onSettled = useCallback(() => { refreshCustomer(); refreshProducts(); }, [refreshCustomer, refreshProducts]);
+
+  function applyCustomer(e) {
     e.preventDefault();
-    setPlacing(true); setPlaceError(""); setPlaced(null);
-    try {
-      const body = { productId: form.productId.trim(), quantity: Number(form.quantity), amount: Number(form.amount) };
-      const data = await createOrder(body);
-      const id = extractId(data);
-      setPlaced({ data, id });
-      if (id) {
-        remember({ id, ...body, at: new Date().toISOString() });
-        setLookupId(id);
-        lookup(id);
-      }
-    } catch (err) { setPlaceError(err.message); }
-    setPlacing(false);
+    const id = draft.trim();
+    setCustomerId(id);
+    try { localStorage.setItem(CUSTOMER_KEY, id); } catch { /* storage unavailable */ }
   }
 
-  const valid = form.productId.trim() && form.quantity > 0 && form.amount >= 0;
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  function orderProduct(p) {
+    setPick({ productId: p.productId, n: Date.now() });
+    setTab("order");
+  }
 
   return (
     <div className="page">
-      <h1>Order desk</h1>
-      <div className="cols">
-        <section className="card">
-          <h2>Place an order</h2>
-          <form onSubmit={submit}>
-            <label>Product ID<input value={form.productId} onChange={set("productId")} /></label>
-            <div className="two">
-              <label>Quantity<input type="number" min="1" value={form.quantity} onChange={set("quantity")} /></label>
-              <label>Amount<input type="number" min="0" step="0.01" value={form.amount} onChange={set("amount")} /></label>
-            </div>
-            <button className="primary" disabled={!valid || placing}>{placing ? "Placing…" : "Place order"}</button>
-          </form>
-          {placeError && <p className="err" role="alert">Order failed: {placeError}</p>}
-          {placed && (
-            <div className="ok">
-              <p>{placed.id ? <>Order placed. ID: <code>{placed.id}</code></> : "Order placed, but no order ID was found in the response:"}</p>
-              {!placed.id && <Result data={placed.data} />}
-            </div>
-          )}
-        </section>
+      <header className="top">
+        <h1>Order desk</h1>
+        <nav className="tabs" aria-label="Sections">
+          {TABS.map(([id, label]) => (
+            <button key={id} className={tab === id ? "tab on" : "tab"} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{label}</button>
+          ))}
+        </nav>
+      </header>
 
-        <section className="card">
-          <h2>Order history</h2>
-          <form className="lookup" onSubmit={(e) => { e.preventDefault(); lookup(lookupId); }}>
-            <input value={lookupId} onChange={(e) => setLookupId(e.target.value)} placeholder="Order ID" aria-label="Order ID" />
-            <button className="primary" disabled={!lookupId.trim() || looking}>{looking ? "Checking…" : "Check order"}</button>
-          </form>
-          <label className="check"><input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Refresh every 3 seconds</label>
-          {lookupError && <p className="err" role="alert">Couldn't load order: {lookupError}</p>}
-          <Result data={order} />
+      <form className="who" onSubmit={applyCustomer}>
+        <label>Customer ID<input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="e.g. C-1001" /></label>
+        <button disabled={draft.trim() === customerId}>Use customer</button>
+        <p className="who-info">
+          {customer ? <>{customer.name} · <strong className="pts">{num(customer.rewardPoints)} points</strong></>
+            : customerError ? <span className="err" role="alert">Couldn't load customer: {customerError}</span>
+            : "No customer selected"}
+        </p>
+      </form>
 
-          {history.length > 0 && (
-            <>
-              <h3>Orders placed from this browser</h3>
-              <ul className="hist">
-                {history.map((h) => (
-                  <li key={h.id}>
-                    <button className="ghost" onClick={() => { setLookupId(h.id); lookup(h.id); }}>
-                      <code>{h.id}</code>
-                      <span>{h.productId} × {h.quantity} · {h.amount} · {when(h.at)}</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </section>
+      <div hidden={tab !== "order"}>
+        <OrderDesk customerId={customerId} customer={customer} products={products} pick={pick} onSettled={onSettled} />
+      </div>
+      <div hidden={tab !== "products"}>
+        <Products products={products} loading={loadingProducts} error={productsError} onReload={refreshProducts} onOrder={orderProduct} />
+      </div>
+      <div hidden={tab !== "admin"}>
+        <Admin active={tab === "admin"} products={products} onStockChanged={refreshProducts} />
       </div>
     </div>
   );
